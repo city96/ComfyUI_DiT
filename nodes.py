@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import folder_paths
 import comfy.model_management
@@ -27,6 +28,7 @@ class DiTCheckpointLoader:
 			}
 		}
 	RETURN_TYPES = ("DIT",) # could be MODEL if it is made compatible?
+	RETURN_NAMES = ("model",)
 	FUNCTION = "load_checkpoint"
 	CATEGORY = "DiT"
 	TITLE = "DiTCheckpointLoader"
@@ -59,17 +61,52 @@ class DiTCheckpointLoader:
 		# return (model,)
 		return (model_patcher,)
 
+
+# todo: this needs fontend code to display properly
+def get_label_data(label_file="labels/imagenet1000.json"):
+	label_path = os.path.join(
+		os.path.dirname(os.path.realpath(__file__)),
+		label_file,
+	)
+	label_data = {0: "None"}
+	with open(label_path, "r") as f:
+		label_data = json.loads(f.read())
+	return label_data
+label_data = get_label_data()
+
+class DiTLabelSelect:
+	@classmethod
+	def INPUT_TYPES(s):
+		global label_data
+		return {
+			"required": {
+				"label_name": (list(label_data.values()),),
+			}
+		}
+
+	RETURN_TYPES = ("DITLAB",)
+	RETURN_NAMES = ("class_labels",)
+	FUNCTION = "label"
+	CATEGORY = "DiT"
+	TITLE = "DiTLabelSelect"
+
+	def label(self, label_name):
+		global label_data
+		class_label = int([k for k,v in label_data.items() if v == label_name][0])
+		return (class_label,)
+
+
 class DiTSampler:
 	@classmethod
 	def INPUT_TYPES(s):
 		return {
 			"required": {
 				"model": ("DIT",),
+				"class_labels": ("DITLAB",),
 				"seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
 				"steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
 				"cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
 				"batch_size": ("INT", {"default": 1, "min": 1, "max": 64}),
-				"class_labels": ([207,],),
 			}
 		}
 	RETURN_TYPES = ("LATENT",)
@@ -107,10 +144,12 @@ class DiTSampler:
 
 NODE_CLASS_MAPPINGS = {
 	"DiTCheckpointLoader": DiTCheckpointLoader,
+	"DiTLabelSelect": DiTLabelSelect,
 	"DiTSampler": DiTSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DiTCheckpointLoader": DiTCheckpointLoader.TITLE,
+    "DiTLabelSelect": DiTLabelSelect.TITLE,
     "DiTSampler": DiTSampler.TITLE,
 }
