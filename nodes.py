@@ -6,6 +6,7 @@ import comfy.model_management
 import comfy.model_patcher
 import comfy.utils
 import comfy.latent_formats
+import latent_preview
 
 from .models import DiT_models
 from .diffusion import create_diffusion
@@ -121,6 +122,8 @@ class DiTSampler:
 		# pre
 		comfy.model_management.load_model_gpu(model)
 		real_model = model.model
+		pbar = comfy.utils.ProgressBar(steps)
+		previewer = latent_preview.get_previewer(device, model.model.latent_format)
 
 		# Create sampling noise:
 		z = torch.randn(batch_size, 4, real_model.latent_size, real_model.latent_size, device=device)
@@ -134,7 +137,7 @@ class DiTSampler:
 
 		# Sample images:
 		samples = diffusion.p_sample_loop(
-			model.model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
+			model.model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, pbar=pbar, previewer=previewer, device=device
 		)
 		samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
 		samples = real_model.latent_format.process_out(samples.to(torch.float32))

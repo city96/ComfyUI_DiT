@@ -426,7 +426,8 @@ class GaussianDiffusion:
         cond_fn=None,
         model_kwargs=None,
         device=None,
-        progress=False,
+        pbar=None,
+        previewer=None,
     ):
         """
         Generate samples from the model.
@@ -456,7 +457,8 @@ class GaussianDiffusion:
             cond_fn=cond_fn,
             model_kwargs=model_kwargs,
             device=device,
-            progress=progress,
+            pbar=pbar,
+            previewer=previewer,
         ):
             final = sample
         return final["sample"]
@@ -471,7 +473,8 @@ class GaussianDiffusion:
         cond_fn=None,
         model_kwargs=None,
         device=None,
-        progress=False,
+        pbar=None,
+        previewer=None,
     ):
         """
         Generate samples from the model and yield intermediate samples from
@@ -489,12 +492,6 @@ class GaussianDiffusion:
             img = th.randn(*shape, device=device)
         indices = list(range(self.num_timesteps))[::-1]
 
-        if progress:
-            # Lazy import so that we don't depend on tqdm.
-            from tqdm.auto import tqdm
-
-            indices = tqdm(indices)
-
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)
             with th.no_grad():
@@ -509,6 +506,11 @@ class GaussianDiffusion:
                 )
                 yield out
                 img = out["sample"]
+            if pbar:
+                preview_bytes = None
+                if previewer:
+                    preview_bytes = previewer.decode_latent_to_preview_image("JPEG", img)
+                pbar.update_absolute(indices.index(i)+1, self.num_timesteps, preview_bytes)
 
     def ddim_sample(
         self,
