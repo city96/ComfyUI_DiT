@@ -104,10 +104,11 @@ class DiTSampler:
 			"required": {
 				"model": ("DIT",),
 				"class_labels": ("DITLAB",),
+				"latent_image": ("LATENT", ),
 				"seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
 				"steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
 				"cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
-				"batch_size": ("INT", {"default": 1, "min": 1, "max": 64}),
+				"denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
 			}
 		}
 	RETURN_TYPES = ("LATENT",)
@@ -115,7 +116,7 @@ class DiTSampler:
 	CATEGORY = "DiT"
 	TITLE = "DiTSampler"
 	
-	def sample(self, model, seed, steps, cfg, batch_size, class_labels):
+	def sample(self, model, class_labels, latent_image, seed, steps, cfg, denoise):
 		device = comfy.model_management.get_torch_device()
 		diffusion = create_diffusion(str(steps))
 
@@ -126,12 +127,16 @@ class DiTSampler:
 		previewer = latent_preview.get_previewer(device, model.model.latent_format)
 
 		# Create sampling noise:
-		z = torch.randn(batch_size, 4, real_model.latent_size, real_model.latent_size, device=device)
+		torch.manual_seed(seed)
+		batch_size = latent_image["samples"].shape[0]
+		zl = latent_image["samples"].to(device)
+		zr = torch.randn(batch_size, 4, real_model.latent_size, real_model.latent_size, device=device)
+		z = torch.lerp(zl,zr,denoise) # this is wrong
 		y = torch.tensor([class_labels] * batch_size, device=device)
 
 		# Setup classifier-free guidance:
 		z = torch.cat([z, z], 0)
-		y_null = torch.tensor([1000] * batch_size, device=device)
+		y_null = torch.tensor([real_model.num_classes] * batch_size, device=device)
 		y = torch.cat([y, y_null], 0)
 		model_kwargs = dict(y=y, cfg_scale=cfg)
 
