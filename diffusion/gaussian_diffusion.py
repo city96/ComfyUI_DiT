@@ -492,6 +492,12 @@ class GaussianDiffusion:
             img = th.randn(*shape, device=device)
         indices = list(range(self.num_timesteps))[::-1]
 
+        y_inter = None
+        if "y_inter" in model_kwargs.keys():
+            if len(model_kwargs["y_inter"]) > 1:
+                y_inter = model_kwargs["y_inter"]
+            del model_kwargs["y_inter"]
+
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)
             with th.no_grad():
@@ -506,6 +512,8 @@ class GaussianDiffusion:
                 )
                 yield out
                 img = out["sample"]
+            if y_inter: model_kwargs["y"] = y_inter[indices.index(i)%len(y_inter)]
+
             if pbar:
                 preview_bytes = None
                 if previewer:

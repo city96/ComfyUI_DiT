@@ -17,7 +17,11 @@ folder_paths.folder_names_and_paths["dit"] = (
 	folder_paths.supported_pt_extensions
 )
 
+
 class DiTCheckpointLoader:
+	"""
+	Model loader with all possible options exposed.
+	"""
 	@classmethod
 	def INPUT_TYPES(s):
 		return {
@@ -35,20 +39,29 @@ class DiTCheckpointLoader:
 	TITLE = "DiTCheckpointLoader"
 
 	def load_checkpoint(self, ckpt_name, model, image_size, num_classes):
-		# note: switch to custom comfy.model_base eventually
-		model = DiT_models[model](
-			input_size=image_size // 8, # latent size
-			num_classes=num_classes
-		)
-
 		ckpt_path = folder_paths.get_full_path("dit", ckpt_name)
 		state_dict = comfy.utils.load_torch_file(ckpt_path)
+		if "model" in state_dict.keys():
+			state_dict = state_dict["model"]
+		dit = self.load_dit(
+			dit_model   = DiT_models[model],
+			state_dict  = state_dict,
+			latent_size = image_size // 8,
+			num_classes = num_classes,
+		)
+		return (dit,)
+
+	def load_dit(self, dit_model, state_dict, latent_size, num_classes):
+		model = dit_model(
+			input_size  = latent_size,
+			num_classes = num_classes,
+		)
 		model.load_state_dict(state_dict)
 		model.eval() # important, apparently
 		
 		# need these later anyway
 		model.latent_format = comfy.latent_formats.SD15()
-		model.latent_size = image_size // 8
+		model.latent_size = latent_size
 		model.num_classes = num_classes
 
 		# I didn't expect this to work but it looks like it does.
@@ -58,12 +71,51 @@ class DiTCheckpointLoader:
 			offload_device=comfy.model_management.unet_offload_device(),
 			current_device="cpu"
 		)
-
-		# return (model,)
-		return (model_patcher,)
+		return model_patcher
 
 
-# todo: this needs fontend code to display properly
+class DiTCheckpointLoaderSimple(DiTCheckpointLoader):
+	"""
+	Auto model loader.
+	To do:
+		- get image_size from pos_embed somehow
+		- guess model type from state_dict
+	"""
+	@classmethod
+	def INPUT_TYPES(s):
+		return {
+			"required": {
+				"ckpt_name": (folder_paths.get_filename_list("dit"),),
+				"model": (list(DiT_models.keys()),),
+				"image_size": ([256, 512],),
+			}
+		}
+	TITLE = "DiTCheckpointLoaderSimple"
+	
+	def load_checkpoint(self, ckpt_name, model, image_size):
+		ckpt_path = folder_paths.get_full_path("dit", ckpt_name)
+		state_dict = comfy.utils.load_torch_file(ckpt_path)
+		if "model" in state_dict.keys():
+			state_dict = state_dict["model"]
+
+		num_classes, hidden_size = state_dict["y_embedder.embedding_table.weight"].shape
+		num_classes -= 1 # adj. for empty
+
+		print("num_classes",num_classes)
+		print("hidden_size",hidden_size)
+
+		latent_size = image_size // 8
+
+		dit = self.load_dit(
+			dit_model   = DiT_models[model],
+			state_dict  = state_dict,
+			latent_size = latent_size,
+			num_classes = num_classes,
+		)
+		return (dit,)
+
+
+# todo: this needs frontend code to display properly
 def get_label_data(label_file="labels/imagenet1000.json"):
 	label_path = os.path.join(
 		os.path.dirname(os.path.realpath(__file__)),
@@ -93,9 +145,28 @@ class DiTLabelSelect:
 
 	def label(self, label_name):
 		global label_data
-		class_label = int([k for k,v in label_data.items() if v == label_name][0])
-		return (class_label,)
+		class_labels = [int(k) for k,v in label_data.items() if v == label_name]
+		return (class_labels,)
 
+class DiTLabelCombine:
+	@classmethod
+	def INPUT_TYPES(s):
+		return {
+			"required": {
+				"class_labels_a": ("DITLAB",),
+				"class_labels_b": ("DITLAB",),
+			}
+		}
+
+	RETURN_TYPES = ("DITLAB",)
+	RETURN_NAMES = ("class_labels",)
+	FUNCTION = "label"
+	CATEGORY = "DiT"
+	TITLE = "DiTLabelCombine"
+
+	def label(self, class_labels_a, class_labels_b):
+		class_labels = class_labels_a + class_labels_b
+		return (class_labels,)
 
 class DiTSampler:
 	@classmethod
@@ -117,7 +188,7 @@ class DiTSampler:
 	TITLE = "DiTSampler"
 	
 	def sample(self, model, class_labels, latent_image, seed, steps, cfg, denoise):
-		device = comfy.model_management.get_torch_device()
+		device = model.load_device
 		diffusion = create_diffusion(str(steps))
 
 		# pre
@@ -132,17 +203,29 @@ class DiTSampler:
 		zl = latent_image["samples"].to(device)
 		zr = torch.randn(batch_size, 4, real_model.latent_size, real_model.latent_size, device=device)
 		z = torch.lerp(zl,zr,denoise) # this is wrong
-		y = torch.tensor([class_labels] * batch_size, device=device)
+
+		y_inter = []
+		y_null = torch.tensor([real_model.num_classes] * batch_size, device=device)
+		for cl in class_labels:
+			cl = min(cl, real_model.num_classes)
+			y = torch.tensor([cl] * batch_size, device=device)
+			y = torch.cat([y, y_null], 0)
+			y_inter.append(y)
 
 		# Setup classifier-free guidance:
 		z = torch.cat([z, z], 0)
-		y_null = torch.tensor([real_model.num_classes] * batch_size, device=device)
-		y = torch.cat([y, y_null], 0)
-		model_kwargs = dict(y=y, cfg_scale=cfg)
+		model_kwargs = dict(y=y_inter[0], y_inter=y_inter, cfg_scale=cfg)
 
 		# Sample images:
 		samples = diffusion.p_sample_loop(
-			model.model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, pbar=pbar, previewer=previewer, device=device
+			model.model.forward_with_cfg,
+			z.shape,
+			z,
+			clip_denoised=False,
+			model_kwargs=model_kwargs,
+			pbar=pbar,
+			previewer=previewer,
+			device=device,
 		)
 		samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
 		samples = real_model.latent_format.process_out(samples.to(torch.float32))
@@ -151,13 +234,17 @@ class DiTSampler:
 		return ({"samples": samples},)
 
 NODE_CLASS_MAPPINGS = {
+	"DiTCheckpointLoaderSimple": DiTCheckpointLoaderSimple,
 	"DiTCheckpointLoader": DiTCheckpointLoader,
+	"DiTLabelCombine": DiTLabelCombine,
 	"DiTLabelSelect": DiTLabelSelect,
 	"DiTSampler": DiTSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "DiTCheckpointLoaderSimple": DiTCheckpointLoaderSimple.TITLE,
     "DiTCheckpointLoader": DiTCheckpointLoader.TITLE,
+    "DiTLabelCombine": DiTLabelCombine.TITLE,
     "DiTLabelSelect": DiTLabelSelect.TITLE,
     "DiTSampler": DiTSampler.TITLE,
 }
